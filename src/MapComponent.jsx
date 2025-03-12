@@ -1,12 +1,25 @@
-import React, { useState, useEffect } from "react";
-import { MapContainer, TileLayer, Marker, Polyline } from "react-leaflet";
+import React, { useState, useEffect, useCallback } from "react";
+import { MapContainer, TileLayer, Marker, Polyline, LayersControl } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
-import "./MapComponent.css";
 import { debounce } from "lodash";
+import "./MapComponent.css";
+import LocationInput from "./components/LocationInput";
 
-const customIcon = L.icon({
-  iconUrl: "https://leafletjs.com/examples/custom-icons/leaf-red.png",
+const { BaseLayer } = LayersControl;
+
+// Custom marker icons (blue for initial, red for destination)
+const initialLocationIcon = L.icon({
+  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png",
+  shadowUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png",
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+  popupAnchor: [1, -34],
+});
+
+const destinationIcon = L.icon({
+  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png",
+  shadowUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png",
   iconSize: [25, 41],
   iconAnchor: [12, 41],
   popupAnchor: [1, -34],
@@ -22,11 +35,17 @@ const MapComponent = () => {
   const [toSuggestions, setToSuggestions] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [routeDistance, setRouteDistance] = useState(null);
+  const [routeDuration, setRouteDuration] = useState(null);
 
-  const defaultCenter = [20, 78]; // India
+  const defaultCenter = [20, 78]; // Center of India
 
+  // Debounced fetch for location suggestions
   const fetchSuggestions = debounce(async (query, setSuggestions) => {
-    if (!query.trim()) return setSuggestions([]);
+    if (!query.trim()) {
+      setSuggestions([]);
+      return;
+    }
     try {
       const response = await fetch(
         `https://nominatim.openstreetmap.org/search?format=json&q=${query}&limit=5`
@@ -44,26 +63,26 @@ const MapComponent = () => {
     setSuggestions([]);
   };
 
-  const getCurrentLocation = () => {
+  // Get user's current location
+  const getCurrentLocation = useCallback(() => {
     if (!navigator.geolocation) {
       alert("❌ Geolocation is not supported by your browser.");
       return;
     }
-  
     navigator.geolocation.getCurrentPosition(
       async (position) => {
-        const { latitude: lat, longitude: lon } = position.coords;
-        console.log(`📍 Current Location: ${lat}, ${lon}`);
-  
+        const { latitude, longitude } = position.coords;
+        console.log(`📍 Current Location: ${latitude}, ${longitude}`);
+
         try {
           const response = await fetch(
-            `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`
+            `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json`
           );
           const data = await response.json();
-  
+
           if (data?.display_name) {
             setFromInput(data.display_name);
-            setFromLocation([lat, lon]);
+            setFromLocation([latitude, longitude]);
           } else {
             console.error("❌ Reverse Geocoding failed");
             alert("Unable to fetch location details. Please try again.");
@@ -75,36 +94,38 @@ const MapComponent = () => {
       },
       (error) => {
         console.error("Geolocation error:", error);
-        switch (error.code) {
-          case error.PERMISSION_DENIED:
-            alert("❌ Location access denied. Please enable location permissions in your browser settings.");
-            break;
-          case error.POSITION_UNAVAILABLE:
-            alert("⚠️ Location information is unavailable.");
-            break;
-          case error.TIMEOUT:
-            alert("⏳ The request to get your location timed out. Please try again.");
-            break;
-          default:
-            alert("❌ An unknown error occurred while fetching your location.");
-        }
+        alert("❌ Unable to fetch location. Please enable location access.");
       }
     );
-  };
-  const getRoute = async () => {
+  }, []);
+
+  // Fetch route
+  const getRoute = useCallback(async () => {
     if (!fromLocation || !toLocation) {
       setErrorMessage("🚨 No locations selected for routing");
       return;
     }
-
     setIsLoading(true);
+    setErrorMessage("");
     try {
       const apiUrl = `https://router.project-osrm.org/route/v1/driving/${fromLocation[1]},${fromLocation[0]};${toLocation[1]},${toLocation[0]}?overview=full&geometries=geojson`;
       const response = await fetch(apiUrl);
       const data = await response.json();
+
       if (data.routes?.length > 0) {
-        const newRoute = data.routes[0].geometry.coordinates.map(coord => [coord[1], coord[0]]);
+        const routeData = data.routes[0];
+        const newRoute = routeData.geometry.coordinates.map(coord => [coord[1], coord[0]]);
         setRoute(newRoute);
+
+        // Distance (meters -> km)
+        const distanceKm = (routeData.distance / 1000).toFixed(2);
+        setRouteDistance(distanceKm);
+
+        // Duration (seconds -> hr/min)
+        const durationMin = Math.round(routeData.duration / 60);
+        const hours = Math.floor(durationMin / 60);
+        const minutes = durationMin % 60;
+        setRouteDuration(hours > 0 ? `${hours} hr ${minutes} min` : `${minutes} min`);
       } else {
         setErrorMessage("⚠️ No route found");
       }
@@ -113,8 +134,9 @@ const MapComponent = () => {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [fromLocation, toLocation]);
 
+  // Swap locations
   const switchLocations = () => {
     if (!fromLocation || !toLocation) return;
     setFromLocation(toLocation);
@@ -124,69 +146,106 @@ const MapComponent = () => {
   };
 
   useEffect(() => {
-    if (fromLocation && toLocation) getRoute();
-  }, [fromLocation, toLocation]);
+    if (fromLocation && toLocation) {
+      getRoute();
+    }
+  }, [fromLocation, toLocation, getRoute]);
 
   return (
-    <div className="container">
-      <h1>Real-Time Location Map</h1>
-      <div className="input-container">
-        <LocationInput
-          value={fromInput}
-          placeholder="Enter Initial Location"
-          onChange={(e) => {
-            setFromInput(e.target.value);
-            fetchSuggestions(e.target.value, setFromSuggestions);
-          }}
-          suggestions={fromSuggestions}
-          onSelect={(place) => selectLocation(place, setFromLocation, setFromInput, setFromSuggestions)}
-        />
-        <button className="green" onClick={getCurrentLocation}>Get Current Location</button>
-        <button className="dark" onClick={switchLocations}>Switch</button>
-        <LocationInput
-          value={toInput}
-          placeholder="Enter Destination Location"
-          onChange={(e) => {
-            setToInput(e.target.value);
-            fetchSuggestions(e.target.value, setToSuggestions);
-          }}
-          suggestions={toSuggestions}
-          onSelect={(place) => selectLocation(place, setToLocation, setToInput, setToSuggestions)}
-        />
+    <div className="map-wrapper">
+      <h1 className="map-title">Real-Time Location Map</h1>
+
+      {/* Controls Section */}
+      <div className="controls-container">
+        <div className="input-group">
+          {/* From Location Input */}
+          <LocationInput
+            value={fromInput}
+            placeholder="Enter Initial Location"
+            onChange={(e) => {
+              setFromInput(e.target.value);
+              fetchSuggestions(e.target.value, setFromSuggestions);
+            }}
+            suggestions={fromSuggestions}
+            onSelect={(place) =>
+              selectLocation(place, setFromLocation, setFromInput, setFromSuggestions)
+            }
+          />
+
+          {/* Current Location & Switch Buttons */}
+          <div className="button-group">
+            <button className="btn green" onClick={getCurrentLocation}>
+              Get Current Location
+            </button>
+            <button className="btn dark" onClick={switchLocations}>
+              Switch
+            </button>
+          </div>
+
+          {/* To Location Input */}
+          <LocationInput
+            value={toInput}
+            placeholder="Enter Destination Location"
+            onChange={(e) => {
+              setToInput(e.target.value);
+              fetchSuggestions(e.target.value, setToSuggestions);
+            }}
+            suggestions={toSuggestions}
+            onSelect={(place) =>
+              selectLocation(place, setToLocation, setToInput, setToSuggestions)
+            }
+          />
+        </div>
+
+        {/* Error or Loading */}
+        {errorMessage && <div className="error-msg">{errorMessage}</div>}
+        {isLoading && <div className="loading-msg">Loading...</div>}
       </div>
-      {errorMessage && <div className="error">{errorMessage}</div>}
-      {isLoading && <div className="loading">Loading...</div>}
+
+      {/* Map Container */}
       <div className="map-container">
-        <MapContainer center={fromLocation || defaultCenter} zoom={6} style={{ height: "500px", width: "100%" }}>
-          <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-          {fromLocation && <Marker position={fromLocation} icon={customIcon} />}
-          {toLocation && <Marker position={toLocation} icon={customIcon} />}
-          {route.length > 0 && <Polyline key={JSON.stringify(route)} positions={route} color="blue" weight={5} />}
+        <MapContainer center={fromLocation || defaultCenter} zoom={6} style={{ height: "100%", width: "100%" }}>
+          <LayersControl position="topright">
+            <BaseLayer checked name="OpenStreetMap">
+              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+            </BaseLayer>
+            <BaseLayer name="Google Satellite">
+              <TileLayer url="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}" />
+            </BaseLayer>
+            <BaseLayer name="Google Terrain">
+              <TileLayer url="https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}" />
+            </BaseLayer>
+            <BaseLayer name="Google Hybrid">
+              <TileLayer url="https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}" />
+            </BaseLayer>
+          </LayersControl>
+
+          {/* From Marker (Blue) */}
+          {fromLocation && (
+            <Marker position={fromLocation} icon={initialLocationIcon}></Marker>
+          )}
+
+          {/* To Marker (Red) */}
+          {toLocation && (
+            <Marker position={toLocation} icon={destinationIcon}></Marker>
+          )}
+
+          {/* Route Polyline */}
+          {route.length > 0 && (
+            <Polyline positions={route} color="blue" weight={5} />
+          )}
         </MapContainer>
       </div>
+
+      {/* Route Info */}
+      {routeDistance && routeDuration && (
+        <div className="route-info">
+          <p><span>Distance:</span> <strong>{routeDistance} km</strong></p>
+          <p><span>Estimated Time:</span> <strong>{routeDuration}</strong></p>
+        </div>
+      )}
     </div>
   );
 };
-
-const LocationInput = ({ value, placeholder, onChange, suggestions, onSelect }) => (
-  <div className="input-box">
-    <input
-      type="text"
-      placeholder={placeholder}
-      value={value}
-      onChange={onChange}
-      aria-label={placeholder}
-    />
-    {suggestions.length > 0 && (
-      <ul className="suggestions">
-        {suggestions.map((place, index) => (
-          <li key={index} onClick={() => onSelect(place)}>
-            {place.display_name}
-          </li>
-        ))}
-      </ul>
-    )}
-  </div>
-);
 
 export default MapComponent;
